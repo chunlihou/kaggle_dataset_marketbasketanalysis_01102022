@@ -1,0 +1,732 @@
+---
+title: "Market Basket Analysis"
+author: "Chun-Li Hou"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output: 
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_depth: 3
+    number_sections: false
+    theme: united
+    highlight: tango
+---
+
+```{r setup, include = F}
+knitr::opts_chunk$set(echo = TRUE, 
+                      message = FALSE, 
+                      warning = FALSE, 
+                      fig.align = "center")
+```
+
+# 1 Objective
+
+Market basket analysis is a technique used by large retailers either online or offline to uncover associations between items. It works by looking for combinations of items that occur together frequently in transactions, providing information to understand the purchase behavior. As in simple terms, a set of rules can be understood as "if this, then that".
+
+Firstly, it is important to define the Apriori algorithm, including some statistical concepts (support, confidence, and lift).
+
+- Support: prior probability, it is an indication of how frequently the itemset appears in the dataset
+- Confidence: posterior probability, it is an indication of how often the rule has been found to be true
+- Lift: confidence/support, if lift > 1, items are said to be complements, significant related, and a simple chance. if lift < 1, items have a negative effect. if lift = 1, items are independent
+
+# 2 Preparation
+
+## Environment
+
+```{r}
+if(!require("pacman")) install.packages("pacman")
+pacman::p_load(tidyverse, dplyr, ggplot2, ggsci, shinythemes, ggridges,
+               viridis, arules, arulesViz, knitr, gridExtra, lubridate,
+               grid)
+
+theme = theme_bw() +
+  theme(plot.title = element_text(face = "bold", size = 15),
+        plot.subtitle = element_text(size = 10),
+        axis.title = element_text(size = 10), 
+        legend.position = "none")
+```
+
+Let us set up the environment.
+
+## Dataset
+
+```{r}
+df = read.csv("DATA.csv")
+
+df = df %>%
+  mutate(Date = as.Date(Date, "%Y-%m-%d")) %>% 
+  mutate(Time = hms(Time)) %>% 
+  filter(Item != "NONE")
+
+write.csv(df, "CLEAN.csv", row.names = F)
+```
+
+We drop all none values in item. The dataset contains 20,507 observations and the following columns.
+
+- Date: the column includes date from 2016/10/30 to 2017/4/9
+- Time: the column tells the time of the transactions
+- Transaction: the column has the quantitative variable that allows us to differentiate the transactions
+- Item: the column is the categorical variable containing the products
+
+## Transformation
+
+```{r}
+trans = read.transactions("CLEAN.csv",
+                          format = "single",
+                          cols = c(3, 4),
+                          sep = ",",
+                          rm.duplicates = T)
+# trans
+# summary(trans)
+```
+
+We are going to use a dataset containing 9,466 individual transactions and 95 unique items from a bakery to apply the algorithm and find combinations of products that are bought together. Most transactions are either 1 or 2 items. There are 3 people who apparently buy 10 items at one transaction.
+
+# 3 Exploring Data Analysis
+
+## 1) What is the best selling product?
+
+Coffee is the best selling product, followed by bread and tea.
+
+```{r, fig.width = 8, fig.height = 5}
+itemFrequencyPlot(trans,
+                  topN = 15,
+                  type = "absolute",
+                  col = "#5CB85CFF",
+                  x1ab = "Item Name",
+                  ylab = "Count",
+                  main = "Absolute Item Count Plot")
+```
+
+As for the absolute frequency, it will plot the numeric frequencies of each item independently.
+
+```{r, fig.width = 8, fig.height = 5}
+itemFrequencyPlot(trans,
+                  topN = 15,
+                  type = "relative",
+                  col = "#357EBDFF",
+                  x1ab = "Item Name",
+                  ylab = "Frequency",
+                  main = "Relative Item Frequency Plot")
+```
+
+As for the relative frequency, it will plot how many times these items have appeared as compared to others.
+
+## 2) What is the trend of the monthly transactions?
+
+```{r, fig.width = 8, fig.height = 5}
+df %>%
+  mutate(Month.d = month(Date)) %>% 
+  mutate(Month.s = format(Date, "%B")) %>% 
+  mutate(Month.s = factor(Month.s, levels = c("October",
+                                              "November",
+                                              "December",
+                                              "January",
+                                              "February",
+                                              "March",
+                                              "April"))) %>% 
+  group_by(Month.s) %>% 
+  summarise(Transaction.dist = n_distinct(Transaction)) %>% 
+  ggplot(aes(x = Month.s,
+             y = Transaction.dist)) +
+  geom_col(position = "dodge",
+           width = 0.7,
+           fill = "#9632B8FF") +
+  geom_text(aes(label = prettyNum(Transaction.dist,
+                                  big.mark = ",")),
+            vjust = -0.5) +
+  scale_y_continuous(limits = c(0, 2500),
+                     breaks = seq(0, 2500, 500)) +
+  theme +
+  labs(title = "Unique Transaction by Month",
+       x = "Month from 2016 to 2017",
+       y = "Unique Transaction")
+```
+
+The dataset includes dates from 2016/10/30 to 2017/4/9, which is why we have few transactions in October and April. The average number of distinct transactions from November to March is 1756 per month. The trend of the transactions is decreasing.
+
+```{r, include = F}
+# noted: make our own logical operator
+`%notin%` = Negate(`%in%`)
+
+df %>%
+  mutate(Month.d = month(Date)) %>% 
+  mutate(Month.s = format(Date, "%B")) %>% 
+  mutate(Month.s = factor(Month.s, levels = c("October",
+                                              "November",
+                                              "December",
+                                              "January",
+                                              "February",
+                                              "March",
+                                              "April"))) %>% 
+  group_by(Month.s) %>% 
+  summarise(Transaction.dist = n_distinct(Transaction)) %>% 
+  filter(Month.s %notin% c("October", "April")) %>%
+  summarise(avg = mean(Transaction.dist))
+```
+
+## 3) What weekday is the best selling day?
+
+```{r, fig.width = 8, fig.height = 5}
+df %>%
+  mutate(Weekday = factor(weekdays(Date),
+                          levels = c("Monday", 
+                                     "Tuesday",
+                                     "Wednesday",
+                                     "Thursday",
+                                     "Friday",
+                                     "Saturday",
+                                     "Sunday"))) %>% 
+  group_by(Weekday) %>% 
+  summarise(Transaction.dist = n_distinct(Transaction)) %>% 
+  ggplot(aes(x = Weekday,
+             y = Transaction.dist)) +
+  geom_col(position = "dodge",
+           width = 0.7,
+           fill = "#D43F3AFF") +
+  geom_text(aes(label = prettyNum(Transaction.dist,
+                                  big.mark = ",")),
+            vjust = -0.5) +
+  scale_y_continuous(limits = c(0, 2500),
+                     breaks = seq(0, 2500, 500)) +
+  theme +
+  labs(title = "Unique Transaction by Weekday",
+       x = "Weekday",
+       y = "Unique Transaction")
+```
+
+Saturday is the busiest day of the week. Conversely, Wednesday is the day with fewer transactions.
+
+## 4) What is the best time of the day to sell?
+
+```{r, fig.width = 8, fig.height = 5}
+df %>%
+  mutate(Hour = factor(hour(Time))) %>% 
+  group_by(Hour) %>% 
+  summarise(Transaction.dist = n_distinct(Transaction)) %>% 
+  ggplot(aes(x = Hour,
+             y = Transaction.dist)) +
+  geom_col(position = "dodge",
+           width = 0.7,
+           fill = "#EEA236FF") +
+  geom_text(aes(label = prettyNum(Transaction.dist,
+                                  big.mark = ",")),
+            vjust = -0.5) +
+  scale_y_continuous(limits = c(0, 2500),
+                     breaks = seq(0, 2500, 500)) +
+  theme +
+  labs(title = "Unique Transaction by Hour",
+       x = "Hour of the Day",
+       y = "Unique Transaction")
+```
+
+The store closes from 2 AM to 6 AM, which is why we have no transactions between that time. The result is logical and expected.
+
+## 5) What are the trends of the best 3 sellers?
+
+```{r, fig.width = 8, fig.height = 5}
+# noted: if filter only one can use ==, but filter more use %in%
+df %>%
+  filter(Item %in% c("Coffee", "Bread", "Tea")) %>%
+  group_by(Item, Date) %>% 
+  summarise(Count = n()) %>% 
+  arrange(Item, Date) %>% 
+  ggplot(aes(x = Date,
+             y = Count,
+             group = Item,
+             color = Item)) +
+  geom_line(size = 1) +
+  scale_color_locuszoom() +
+  theme +
+  theme(legend.position = "right") +
+  labs(title = "Sales by Item by Date",
+       x = "Time",
+       y = "Count")
+```
+
+The top 3 best sellers trends are similar. They show some obvious peaks and valleys. Saturday is the big sales day for this bakery, followed by Sunday, which we already discovered from the above plot.
+
+```{r, fig.width = 8, fig.height = 5}
+df %>%
+  filter(Item %in% c("Coffee", "Bread", "Tea")) %>% 
+  mutate(Hour = factor(hour(Time))) %>% 
+  group_by(Item, Hour) %>% 
+  summarise(Count = n()) %>% 
+  arrange(Item, Hour) %>% 
+  ggplot(aes(x = Hour,
+             y = Count,
+             group = Item,
+             color = Item)) +
+  geom_line(size = 1.5) +
+  scale_color_locuszoom() +
+  theme +
+  theme(legend.position = "right") +
+  labs(title = "Sales by Item by Hour",
+       x = "Hour of the Day",
+       y = "Count")
+```
+
+The customers tend to buy coffee and bread in the morning, and they like to drink tea and have cake (not shown in the plot) in the afternoon.
+
+## 6) What is the transaction distribution by weekday by hour?
+
+```{r, fig.width = 8, fig.height = 5}
+df %>% 
+  mutate(Hour = factor(hour(Time)),
+         Weekday = factor(weekdays(Date),
+                          levels = c("Sunday", 
+                                     "Saturday",
+                                     "Friday",
+                                     "Thursday",
+                                     "Wednesday",
+                                     "Tuesday",
+                                     "Monday"))) %>% 
+  group_by(Weekday, Hour, Transaction) %>% 
+  summarise(Count = n()) %>%
+  ggplot(aes(x = Hour,
+             y = Weekday,
+             group = Weekday,
+             fill = ..density..)) +
+  geom_density_ridges_gradient(scale = 2,
+                               rel_min_height = 0.01) +
+  scale_fill_viridis(option = "inferno") +
+  theme +
+  labs(title = "Transaction Density by Weekday by Hour",
+       x = "Hour of the Day",
+       y = "Weekday")
+```
+
+The distribution density plot tells us that Saturday has a wider breadth and sees the most transactions overall. Sunday falls close being with Sunday lunch having the densest transaction peak.
+
+## 7) How many items do people buy per transaction by hour?
+
+```{r, fig.width = 8, fig.height = 5}
+temp.1 = df %>%
+  mutate(Hour = factor(hour(Time))) %>% 
+  group_by(Hour) %>% 
+  summarise(Count = n())
+
+temp.2 = df %>%
+  mutate(Hour = factor(hour(Time))) %>% 
+  group_by(Hour, Transaction) %>% 
+  summarise(n_distinct(Transaction)) %>%
+  summarise(Count = n())
+
+temp.3 = data.frame(temp.1,
+                    temp.2[2],
+                    temp.1[2]/temp.2[2])
+
+names(temp.3) = c("Hour",
+                  "Total.item",
+                  "Total.unique.trans",
+                  "Item.per.trans")
+
+ggplot(data = temp.3,
+       aes(x = Hour,
+           y = Item.per.trans,
+           fill = Item.per.trans)) +
+  geom_col(position = "dodge",
+           width = 0.7) +
+  geom_text(aes(label = round(Item.per.trans, 1)),
+            vjust = -0.5) +
+  scale_y_continuous(limits = c(0, 2.5),
+                     breaks = seq(0, 2.5, 1)) +
+  scale_fill_viridis(option = "magma") +
+  theme +
+  labs(title = "Total Item per Unique Transaction by Hour",
+       x = "Hour of the Day",
+       y = "Item per Transaction")
+```
+
+People buy the most items per transaction between 10 AM to 5 PM. Again, this result is logical and expected. On the other side, before 10 AM and after 5 PM are likely buying only a single item.
+
+# 4 Machine Learning Analysis
+
+***Market Basket Analysis (Optimization) | Recommendation | Affinity (Association) Analysis***
+
+## 1) Choice of support and confidence
+
+Remember, item frequency is directly related to the support. The maximum item frequency at 0.48 is the item of coffee. As a rule of thumb, we can find support level value by dividing 0.48*100 by the total number amount of transactions (length(trans) = 9,466). The approximation of support level is 0.005. We will use tunning method to search the optimization. However, we will find out that the optimal value is closed to our approximation at first.
+
+So what about confidence? Let us use a coin toss as inspiration. Remember, confidence is that likelihood, which means that having purchased the item on the left-hand side, the item on the right-hand side will be purchased in addition. So, let us go with 50% or a value of 0.5 to be confidence level.
+
+```{r, results = "hide"}
+# support
+support.level = c(0.1, 0.05, 0.01, 0.005)
+
+# confidence
+confidence.level = c(0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1)
+
+# empty integer
+rule.sup.10 = integer(length = 9)
+rule.sup.5 = integer(length = 9)
+rule.sup.1 = integer(length = 9)
+rule.sup.05 = integer(length = 9)
+
+# apriori algorithm with a support level of 10%
+for (i in 1:length(confidence.level)) {
+  rule.sup.10[i] = length(apriori(
+    trans,
+    parameter = list(sup = support.level[1], 
+                     conf = confidence.level[i], 
+                     target = "rules")))}
+
+# apriori algorithm with a support level of 5%
+for (i in 1:length(confidence.level)) {
+  rule.sup.5[i] = length(apriori(
+    trans,
+    parameter = list(sup = support.level[2], 
+                     conf = confidence.level[i], 
+                     target = "rules")))}
+
+# apriori algorithm with a support level of 1%
+for (i in 1:length(confidence.level)) {
+  rule.sup.1[i] = length(apriori(
+    trans,
+    parameter = list(sup = support.level[3], 
+                     conf = confidence.level[i], 
+                     target = "rules")))}
+
+# apriori algorithm with a support level of 0.5%
+for (i in 1:length(confidence.level)) {
+  rule.sup.05[i] = length(apriori(
+    trans,
+    parameter = list(sup = support.level[4], 
+                     conf = confidence.level[i], 
+                     target = "rules")))}
+```
+
+```{r, fig.width = 8, fig.height = 5}
+p.1 = qplot(confidence.level,
+            rule.sup.10,
+            geom = c("point", "line"),
+            xlab = "Confidence Level",
+            ylab = "Number of Rules Found",
+            main = "Support Level of 10%") + theme
+
+p.2 = qplot(confidence.level,
+            rule.sup.5,
+            geom = c("point", "line"),
+            xlab = "Confidence Level",
+            ylab = "Number of Rules Found",
+            main = "Support Level of 5%") + theme
+
+p.3 = qplot(confidence.level,
+            rule.sup.1,
+            geom = c("point", "line"),
+            xlab = "Confidence Level",
+            ylab = "Number of Rules Found",
+            main = "Support Level of 1%") + theme
+
+p.4 = qplot(confidence.level,
+            rule.sup.05,
+            geom = c("point", "line"),
+            xlab = "Confidence Level",
+            ylab = "Number of Rules Found",
+            main = "Support Level of 0.5%") + theme
+
+grid.arrange(p.1, p.2, p.3, p.4,
+             layout_matrix = rbind(c(1, 2),
+                                   c(3, 4)),
+             top = textGrob("Apriori",
+                            gp = gpar(fontsize = 20,
+                                      font = 2)))
+```
+
+Let us analyze the result. We only identify rules with a confidence of at least 0.5.
+
+- Support level of 10%: support is already high but confidence level sets higher than. So, the rules are unrepresentative. there are no relative frequent associtaions
+- Support level of 5%: it still has too lesser number of rules
+- Support level of 1%: it has a perfect range number of rules which is about 10 to 15 rules
+- Support level of 0.5%: too many rules to analyze and lead the analysis to divergent
+
+```{r, fig.width = 8, fig.height = 5}
+rule = data.frame(rule.sup.10,
+                  rule.sup.5,
+                  rule.sup.1,
+                  rule.sup.05,
+                  confidence.level)
+
+ggplot(data = rule,
+       aes(x = confidence.level)) +
+  geom_line(aes(y = rule.sup.10, color = "Support Level of 0.1"),
+            size = 1) +
+  geom_point(aes(y = rule.sup.10, color = "Support Level of 0.1"),
+            size = 3) +
+  geom_line(aes(y = rule.sup.5, color = "Support Level of 0.05"),
+            size = 1) +
+  geom_point(aes(y = rule.sup.5, color = "Support Level of 0.05"),
+            size = 3) +
+  geom_line(aes(y = rule.sup.1, color = "Support Level of 0.01"),
+            size = 1) +
+  geom_point(aes(y = rule.sup.1, color = "Support Level of 0.01"),
+            size = 3) +
+  geom_line(aes(y = rule.sup.05, color = "Support Level of 0.005"),
+            size = 1) +
+  geom_point(aes(y = rule.sup.05, color = "Support Level of 0.005"),
+            size = 3) +
+  scale_color_locuszoom() +
+  scale_y_continuous(limits = c(0, 20),
+                     breaks = seq(0, 20, 5)) +
+  theme +
+  theme(legend.position = "right") +
+  labs(title = "Optimization in Support and Confidence",
+       x = "Confidence Level",
+       y = "Number of Rules Found",
+       color = NULL)
+```
+
+We join the lines to improve the visualization. We can find out the optimization point for parameters. We see confidence level as 0.5 and rules around 10 to 15. So, we get the support level of 0.01 and the confidence level as 0.5 to be the optimized tunning for this apriori model.
+
+## 2) Execution
+
+```{r, results = "hide"}
+# support level of 0.01 and confidence level of 0.5
+model = apriori(trans,
+                parameter = list(sup = 0.01,
+                                 conf = 0.5,
+                                 target = "rules"))
+# model
+```
+
+We have a set of 11 rules, which is the optimal number to be manageable.
+
+```{r}
+# model %>% head(by = "confidence", n = 15) %>% inspect()
+inspectDT(model)
+```
+
+We create an HTML table by using the inspect function and it can be interactively filtered and sorted.
+
+Here is an example of interpreting these rules. The toast buying customer is 2.4% in the population of transactions. But, 70% of the customers who buy a toast will also buy a coffee. As for the lift, it tells us that coffee is 1.47 times more likely to be bought by the customers who buy toast compared to the default likelihood of the sale of coffee.
+
+As for other rules, cake, pastry, and sandwiches are commonly bought in tandem with coffee. Oddly, the juice is also frequently bought with coffee. We can assume that this is due to one person buying for another. Or, this is another innovative way to enjoy coffee.
+
+## 3) Visualize association rules
+
+```{r, fig.width = 8, fig.height = 5}
+plot(model,
+     measure = c("support",
+                 "confidence"),
+     shading = "lift")
+```
+
+We use a simple plot with different measures of interestingness on the dimensions, including support, confidence, and lift. Based on the lift, we find out the example of toast and coffee is the most promising and significant.
+
+```{r, fig.width = 8, fig.height = 5}
+plot(model, 
+     method = "graph")
+
+# interactively shiny object
+# plot(model, method = "graph", interactive = T)
+
+# better structure plot
+# plot(model, method = "graph", engine = "graphviz")
+```
+
+This visualization represents the rules as a graph with items labeled as vertices and rules represented as vertices connected to items using arrows. This graph is not useful in this case. In a grocery store, we might see many different clusters characterizing different shoppers, which can show us the customer clustering analysis.
+
+```{r, fig.width = 8, fig.height = 5}
+plot(model,
+     method = "grouped")
+```
+
+The support is represented by the size and the lift is measured by the color of the balloons. Since we only have coffee on the right-hand side of the rules, this is not a very useful visualization.
+
+```{r, fig.width = 8, fig.height = 5}
+plot(model,
+     method = "paracoord",
+     control = list(reorder = T))
+```
+
+The color represents lift and the size measures support. It connected the 1 as the left-hand side to the right-hand side.
+
+```{r}
+# interactively shiny object
+# ruleExplorer(model)
+```
+
+Since Rmarkdown cannot support knitting shiny objects, it is meaningless to publish this function. However, we can still use it on-premises. Anyway, we already have the output plots in advance. And, we have a well explanatory on rules.
+
+# 5 Conclusion
+
+The best rule number range would be from 10 to 15 rules. It is impossible to analyze over 20 or up to 100 rules and even in visualizations. For larger rule sets visual analysis becomes difficult. Also, most of the rules will be useless. That is why we have to carefully select the parameters, the minimum support and confidence.
+
+The recommendation can give to the owner of the bakery. Firstly, simply at the point of sale is for anyone buying coffee, bread, or tea and not buying anything else may offer an incentive or promotion to get a secondary item. These items are based on relatively high frequency, such as coffee, bread, and tea. In other words, these are the best selling items. The company can have more marketing strategies to boost the best selling themselves.
+
+Additionally, based on high confidence or high lift rules, such as toast and Spanish brunch, decreasing the price of left-hand side items. So, it can promote consumption and increase the desire to buy. Also, increasing the price of the right-hand side item, which is the coffee. So, the one transaction profit is not changed. Hence, this strategy can enhance sales and increase revenue. This strategy is cross-selling.
+
+On the other hand, based on high support rules, such as cake and pastry, they can set the coffee in to be a combo with a cheap price, actually the coffee original price and the cake or pastry price not changed. This strategy can increase the coffee sales in the customers who buy cake or pastry, which two in fact are the best seller already. Hence, this can also increase marketing effectiveness. This strategy is up-selling.
+
+Finally, we can also mind some business strategies from the exploratory data analysis. For example, from the plot of "Transaction Density by Weekday by Hour", we can schedule staff and determine when additional staff is required or when only minimal staff is needed.
+
+Furthermore, from the plot of "Total Item per Unique Transaction by Hour", as a business we obviously want to sell more items, as for before 10 AM and after 5 PM, promotion or discount might incentivize the purchase of a secondary item. As for the hours of 10 AM to 5 PM, we want to incentivize purchasing of a third item.
+
+# 6 Exercise
+
+## Dataset.1: Market basket optimization.csv
+
+```{r, results = "hide"}
+trans.1 = read.transactions("Market_Basket_Optimisation.csv",
+                            format = "basket",
+                            sep = ",",
+                            header = F,
+                            rm.duplicates = T)
+summary(trans.1)
+
+# support: rule of thumb => 1788/7501*100/7501 = 0.003 
+#                        => 0.005 convergent
+# confidence: coin toss => 0.5
+
+# For model.1.1: what products influenced the purchase of product X?
+model.1.1 = apriori(trans.1,
+                    parameter = list(sup = 0.005,
+                                     conf = 0.5,
+                                     target = "rules"))
+model.1.1
+
+# For model.1.2: what purchases did product X influence?
+# model.1.2 = apriori(trans.1,
+#                     parameter = list(sup = 0.003,
+#                                      conf = 0.1,
+#                                      target = "rules"),
+#                     appearance = list(default = "rhs",
+#                                       lhs = "mineral water"))
+# model.1.2
+```
+
+- Based on high lift rules, we use cross-selling strategy as decreasing the price of left-hand side, such as shrimp, ground beef, frozen vegetables, and olive oil, and increasing the price of right-hand side, such as spaghetti
+- As for high support rules, we use up-selling strategy as setting ground beef, milk, and eggs with mineral water as a combo 
+
+## Dataset.2: Groceries.csv
+
+```{r, results = "hide", fig.width = 8, fig.height = 5}
+trans.2 = read.transactions("Groceries.csv",
+                            format = "basket",
+                            sep = ",",
+                            header = F,
+                            rm.duplicates = T)
+summary(trans.2)
+
+# support: rule of thumb => 2513/9835*100/9835 = 0.002 
+#                        => 0.01 convergent
+# confidence: coin toss => 0.5
+
+model.2.1 = apriori(trans.2,
+                    parameter = list(sup = 0.01,
+                                     conf = 0.5,
+                                     target = "rules"))
+model.2.1
+
+inspectDT(model.2.1)
+
+# plot(model.2.1, method = "graph")
+# plot(model.2.1, method = "graph", engine = "graphviz")
+
+model.2.2 = apriori(trans.2, 
+                    parameter = list(sup = 0.01,
+                                     conf = 0.5),
+                    appearance = list(default = "lhs",
+                                      rhs = "whole milk"))
+model.2.2
+
+inspectDT(model.2.2)
+
+# confidence: 0.5 => 0.25 => 0.125 divergent
+
+model.2.3 = apriori(trans.2, 
+                    parameter = list(sup = 0.01,
+                                     conf = 0.25,
+                                     minlen = 2),
+                    appearance = list(default = "rhs",
+                                      lhs = "whole milk"))
+model.2.3
+
+inspectDT(model.2.3)
+```
+
+This is the easiest way to explore rules by sorting high confidence, which can know that if buy A, then get B significantly.
+
+- From model.2.1, based on high confidence and lift rules, if citrus fruit, root vegetables, and tropical fruit, then other vegetables will buy significantly. We can use cross-selling strategy
+
+There are 2 types of target direction we can discuss with the highest frequency item, such as whole milk. Also, exploring rules are sorted in high confidence. 
+
+- What are customers likely to buy before buying whole milk?
+    - From model.2.2, before buying whole milk, customers likely buy curd, yogurt, butter, and other vegetables
+- What are customers likely to but if they purchase whole milk?
+    - From model.2.3, after buying whole milk, customers likely buy other vegetables, rolls, and buns
+    
+Additionally, we can see from the network plot that there are two clusters of customers, one hub is whole milk; another hub is other vegetables.
+
+## Dataset.3: BreadBasket_DMS.csv
+
+```{r, results = "hide"}
+# set both support and confidence to be min
+# model.3.1: 1003
+model.3.1 = apriori(trans,
+                   parameter = list(sup = 0.001,
+                                    conf = 0.001,
+                                    minlen = 2))
+# filter by lift mean
+# model.3.2: 274
+model.3.1 %>% summary()
+model.3.2 = subset(model.3.1, 
+                  subset = lift > 1.6543)
+
+# remove redundant rules
+# model.3.3: 254
+model.3.3 = model.3.2[!is.redundant(model.3.2)]
+
+# remove statistically insignificant rules
+# model.3.4: 165
+model.3.4 = model.3.3[!is.significant(model.3.3,
+                                    trans,
+                                    method = "fisher",
+                                    adjust = "bonferroni")]
+
+# what products influence the purchase of coffee
+# filter rhs as coffee
+# model.3.5: 5
+model.3.5 = subset(model.3.4,
+                  subset = rhs %in% "Coffee")
+model.3.5 %>% head(by = "confidence", n = 5) %>% inspect()
+
+# what purchases do coffee influence
+# filter lhs as coffee
+# model.3.6: 47
+model.3.6 = subset(model.3.4,
+                  subset = lhs %in% "Coffee")
+model.3.6 %>% head(by = "confidence", n = 5) %>% inspect()
+
+# what products influence the purchase of non coffee
+# filter rhs as non coffee
+# model.3.7: 160
+model.3.7 = subset(model.3.4,
+                  subset = rhs %notin% "Coffee")
+model.3.7 %>% head(by = "confidence", n = 5) %>% inspect()
+
+# what purchases do non coffee influence
+# filter lhs as non coffee
+# model.3.8: 118
+model.3.8 = subset(model.3.4,
+                  subset = lhs %notin% "Coffee")
+model.3.8 %>% head(by = "confidence", n = 5) %>% inspect()
+
+# what are the rules excluding coffee
+# model.3.9: 113
+model.3.9 = subset(model.3.4,
+              subset = (lhs %notin% "Coffee" & rhs %notin% "Coffee"))
+model.3.9 %>% head(by = "confidence", n = 5) %>% inspect()
+```
+
+We use another way to proceed with the analysis from setting values, filtering rules, to answering final questions.
+
+# 7 Reference
+
+- [Dataset / 2018 / Sulman Sarwar](https://t.ly/eKmJ)
+- [Package / 2021 / Bob Rudis](https://t.ly/xtTC)
+- [Ref EDA / 2018 / Edward Yu](https://t.ly/tHU3)
+- [Ref MBA.1 / 2020 / Xavier Vivancos García](https://t.ly/3gBl)
+- [Ref MBA.2 / 2019 / R Squared Academy](https://t.ly/pOhW)
+- [Ref MBA.3 / 2014 / Salem Marafi](https://t.ly/6Ukg)
+- [Ref MBA.4 / 2019 / Nancy Chelaru Centea](https://t.ly/0aqy)
